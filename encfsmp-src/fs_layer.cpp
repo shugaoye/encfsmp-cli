@@ -1,33 +1,35 @@
 /**
- * Simplified fs_layer implementation for command-line EncFS tool.
- * POSIX-compatible file operations used by the EncFS core library.
+ * Simplified POSIX fs_layer for EncFSMP CLI.
+ * Works on Linux, macOS, and MSYS2/MinGW (Windows).
+ * All filesystems use the same POSIX API.
  */
 
 #include "config.h"
 #include "fs_layer.h"
 #include "FileStatCache.h"
 
-#include <errno.h>
-#include <stdio.h>
-#include <fcntl.h>
-#include <sys/stat.h>
+#include <cerrno>
+#include <cstdio>
+#include <cstdarg>
+#include <cstring>
+#include <ctime>
+#include <fstream>
+#include <sstream>
+#include <string>
+#include <algorithm>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <sys/time.h>
-#include <sys/statvfs.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <dirent.h>
 #include <utime.h>
-#include <time.h>
-#include <string.h>
-#include <stdarg.h>
-#include <cctype>
-#include <string>
-#include <algorithm>
-#include <fstream>
-#include <sstream>
 #include <boost/filesystem.hpp>
 
-// FileStatCache implementation
+// ---------------------------------------------------------------------------
+// FileStatCache implementation (shared by fs_layer::stat)
+// ---------------------------------------------------------------------------
+
 static FileStatCache g_statCache;
 
 FileStatCache::FileStatCache() : cacheSize_(128) {}
@@ -39,7 +41,7 @@ void FileStatCache::setCacheSize(int cacheSize) { cacheSize_ = cacheSize; }
 void FileStatCache::addStatToCache(const char *path, int retVal, efs_stat *buffer) {
     if (cacheSize_ <= 0) return;
     CacheEntry entry;
-    entry.time_ = time(NULL);
+    entry.time_ = time(nullptr);
     entry.retVal_ = retVal;
     if (retVal == 0 && buffer) entry.stat_ = *buffer;
     cache_[std::string(path)] = entry;
@@ -63,7 +65,9 @@ void FileStatCache::forgetCachedStat(const char *path) {
     cache_.erase(std::string(path));
 }
 
-// --- fs_layer static methods
+// ---------------------------------------------------------------------------
+// fs_layer implementation - pure POSIX pass-through
+// ---------------------------------------------------------------------------
 
 int fs_layer::gettimeofday(struct fs_layer::timeval_fs *tv, void *tz) {
     return ::gettimeofday((struct timeval *)tv, (struct timezone *)tz);
@@ -89,17 +93,56 @@ bool fs_layer::writeFileFromString(const char *fn, const std::string &str) {
     return true;
 }
 
-int fs_layer::stat(const char *path, efs_stat *buffer) {
-    return g_statCache.stat(path, buffer);
+int fs_layer::fsync(int fd) { return ::fsync(fd); }
+int fs_layer::fdatasync(int fd) { return ::fsync(fd); }
+int fs_layer::fstat(int fd, efs_stat *buf) { return ::fstat(fd, buf); }
+
+int64_t fs_layer::pread(int fd, void *buf, int64_t count, int64_t offset) {
+    return (int64_t)::pread(fd, buf, (size_t)count, (off_t)offset);
 }
 
-int fs_layer::stat_cached(const char *path, efs_stat *buffer, void *pStatCache) {
-    if (pStatCache) return static_cast<FileStatCache*>(pStatCache)->stat(path, buffer);
-    return ::stat(path, buffer);
+int64_t fs_layer::pwrite(int fd, const void *buf, int64_t count, int64_t offset) {
+    return (int64_t)::pwrite(fd, buf, (size_t)count, (off_t)offset);
+}
+
+int fs_layer::read(int fd, void *buf, unsigned int count) {
+    return (int)::read(fd, buf, count);
+}
+
+int fs_layer::write(int fd, const void *buf, unsigned int count) {
+    return (int)::write(fd, buf, count);
+}
+
+int fs_layer::truncate(const char *path, int64_t length) {
+    return ::truncate(path, (off_t)length);
+}
+
+int fs_layer::ftruncate(int fd, int64_t length) {
+    return ::ftruncate(fd, (off_t)length);
+}
+
+int fs_layer::statvfs(const char *path, struct statvfs *buf) {
+    return ::statvfs(path, buf);
+}
+
+int fs_layer::utimes(const char *filename, const struct fs_layer::timeval_fs times[2]) {
+    return ::utimes(filename, (const struct timeval *)times);
+}
+
+int fs_layer::futimes(int fd, const struct fs_layer::timeval_fs times[2]) {
+    (void)fd; (void)times; return 0;
+}
+
+int fs_layer::utime(const char *filename, struct utimbuf *times) {
+    return ::utime(filename, times);
+}
+
+int fs_layer::creat(const char *fn, unsigned short mode) {
+    return ::open(fn, O_WRONLY | O_CREAT | O_TRUNC, (mode_t)mode);
 }
 
 int fs_layer::open(const char *fn, int flags, ...) {
-    mode_t mode = 0640;
+    mode_t mode = 0;
     if (flags & O_CREAT) {
         va_list args;
         va_start(args, flags);
@@ -111,71 +154,29 @@ int fs_layer::open(const char *fn, int flags, ...) {
 
 int fs_layer::close(int fd) { return ::close(fd); }
 
-int fs_layer::read(int fd, void *buf, unsigned int count) {
-    return (int)::read(fd, buf, count);
-}
-
-int fs_layer::write(int fd, const void *buf, unsigned int count) {
-    return (int)::write(fd, buf, count);
-}
-
-int64_t fs_layer::pread(int fd, void *buf, int64_t count, int64_t offset) {
-    return (int64_t)::pread(fd, buf, (size_t)count, (off_t)offset);
-}
-
-int64_t fs_layer::pwrite(int fd, const void *buf, int64_t count, int64_t offset) {
-    return (int64_t)::pwrite(fd, buf, (size_t)count, (off_t)offset);
-}
-
-int fs_layer::fstat(int fd, efs_stat *buf) { return ::fstat(fd, buf); }
-
-int fs_layer::fsync(int fd) { return ::fsync(fd); }
-
-int fs_layer::fdatasync(int fd) { return ::fdatasync(fd); }
-
 int fs_layer::mkdir(const char *fn, int mode) { return ::mkdir(fn, (mode_t)mode); }
-
-int fs_layer::unlink(const char *path) { return ::unlink(path); }
-
-int fs_layer::rmdir(const char *path) { return ::rmdir(path); }
-
-int fs_layer::chmod(const char *path, int mode) { return ::chmod(path, (mode_t)mode); }
-
-int fs_layer::truncate(const char *path, int64_t length) {
-    return ::truncate(path, (off_t)length);
-}
-
-int fs_layer::ftruncate(int fd, int64_t length) {
-    return ::ftruncate(fd, (off_t)length);
-}
 
 int fs_layer::rename(const char *oldpath, const char *newpath) {
     return ::rename(oldpath, newpath);
 }
 
-int fs_layer::utime(const char *filename, struct utimbuf *times) {
-    return ::utime(filename, times);
+int fs_layer::unlink(const char *path) { return ::unlink(path); }
+int fs_layer::rmdir(const char *path) { return ::rmdir(path); }
+
+int fs_layer::stat(const char *path, efs_stat *buffer) {
+    return g_statCache.stat(path, buffer);
 }
 
-int fs_layer::utimes(const char *filename, const struct fs_layer::timeval_fs times[2]) {
-    return ::utimes(filename, (const struct timeval *)times);
+int fs_layer::stat_cached(const char *path, efs_stat *buffer, void *pStatCache) {
+    if (pStatCache) return static_cast<FileStatCache*>(pStatCache)->stat(path, buffer);
+    return ::stat(path, buffer);
 }
 
-int fs_layer::futimes(int fd, const struct fs_layer::timeval_fs times[2]) {
-    (void)fd; (void)times; return 0;
-}
+int fs_layer::chmod(const char *path, int mode) { return ::chmod(path, (mode_t)mode); }
 
-int fs_layer::creat(const char *fn, unsigned short mode) {
-    return ::open(fn, O_WRONLY | O_CREAT | O_TRUNC, (mode_t)mode);
-}
-
-int fs_layer::statvfs(const char *path, struct statvfs *buf) {
-    return ::statvfs(path, buf);
-}
-
-DIR *fs_layer::opendir(const char *name) { return ::opendir(name); }
-int fs_layer::closedir(DIR *dir) { return ::closedir(dir); }
-struct dirent *fs_layer::readdir(DIR *dir) { return ::readdir(dir); }
+fs_layer::DIR *fs_layer::opendir(const char *name) { return ::opendir(name); }
+int fs_layer::closedir(fs_layer::DIR *dir) { return ::closedir(dir); }
+struct dirent *fs_layer::readdir(fs_layer::DIR *dir) { return ::readdir(dir); }
 
 bool fs_layer::capacity(const std::string &rootDir,
                         uint64_t &totalCapacity, uint64_t &availableCapacity) {

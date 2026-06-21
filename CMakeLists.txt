@@ -5,6 +5,39 @@ set(CMAKE_CXX_STANDARD 14)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
+# ---------------------------------------------------------------------
+# Platform detection:
+#   Linux/macOS:   full POSIX
+#   Windows (MSYS2/MinGW): POSIX via MSYS2 runtime
+# ---------------------------------------------------------------------
+if(WIN32)
+    # MSYS2/MinGW provides POSIX headers (dirent.h, unistd.h, etc.)
+    # Enable 64-bit file offset support
+    add_definitions(-D_FILE_OFFSET_BITS=64)
+    add_definitions(-D_WIN32_WINNT=0x0601)
+    # Don't define UNICODE/_UNICODE: EncFSMP code uses char/string
+else()
+    add_definitions(-DHAVE_LINUX -DEFS_64_BIT)
+    add_definitions(-D_FILE_OFFSET_BITS=64)
+endif()
+
+# Common feature defines
+add_definitions(
+    -DHAVE_SYS_STAT_H
+    -DHAVE_SYS_TYPES_H
+    -DHAVE_STDLIB_H
+    -DHAVE_STRING_H
+    -DHAVE_MEMORY_H
+    -DHAVE_FCNTL_H
+)
+
+if(NOT WIN32)
+    add_definitions(-DHAVE_DIRENT_H -DHAVE_UNISTD_H -DHAVE_DLFCN_H -DHAVE_SYS_STATVFS_H)
+else()
+    # MSYS2/MinGW has dirent.h in its POSIX layer
+    add_definitions(-DHAVE_DIRENT_H -DHAVE_UNISTD_H)
+endif()
+
 # Paths
 set(ENCFSMP_ROOT "${CMAKE_SOURCE_DIR}/encfsmp-src")
 
@@ -28,17 +61,6 @@ find_package(Boost 1.53.0 REQUIRED COMPONENTS
     filesystem thread date_time serialization system
 )
 include_directories(${Boost_INCLUDE_DIRS})
-
-# Platform-specific definitions
-if(WIN32)
-    add_definitions(-DWIN32 -D_WINDOWS -DHAVE_WIN32 -DUNICODE -D_UNICODE)
-    add_definitions(-D_CRT_SECURE_NO_WARNINGS -D_CRT_SECURE_NO_DEPRECATE)
-else()
-    add_definitions(-DHAVE_LINUX -DEFS_64_BIT)
-    add_definitions(-DHAVE_SYS_STAT_H -DHAVE_SYS_TYPES_H -DHAVE_UNISTD_H)
-    add_definitions(-DHAVE_STDLIB_H -DHAVE_STRING_H -DHAVE_MEMORY_H -DHAVE_DLFCN_H)
-    add_definitions(-DHAVE_FCNTL_H -DHAVE_DIRENT_H)
-endif()
 
 # EncFS core source files
 set(ENCFS_SOURCES
@@ -94,6 +116,11 @@ target_link_libraries(encfsmp_cli PRIVATE
     $<$<NOT:$<BOOL:${WIN32}>>:rt>
     $<$<NOT:$<BOOL:${WIN32}>>:dl>
 )
+
+# On Windows/MSYS2 we need to link the socket/network libs
+if(WIN32)
+    target_link_libraries(encfsmp_cli PRIVATE ws2_32 mswsock advapi32)
+endif()
 
 # Installation
 install(TARGETS encfsmp_cli DESTINATION bin)

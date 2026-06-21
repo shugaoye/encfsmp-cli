@@ -12,11 +12,16 @@
 #include <cstdlib>
 #include <ctime>
 #include <iomanip>
+
+// Use POSIX headers on all platforms:
+//   - Linux/macOS: native POSIX
+//   - Windows via MSYS2/MinGW: POSIX layer included with the toolchain
+#include <sys/types.h>
 #include <sys/stat.h>
+#include <fcntl.h>
 #include <dirent.h>
 #include <unistd.h>
-#include <termios.h>
-#include <fcntl.h>
+#include <sys/statvfs.h>
 
 #include <boost/filesystem.hpp>
 
@@ -51,27 +56,6 @@ static std::string ensureTrailingSlash(const std::string& p) {
     return p;
 }
 
-// Create a shell script that echoes the password N times
-static std::string makePasswordScript(const std::string& password, int lines) {
-    char tmpl[64];
-    snprintf(tmpl, sizeof(tmpl), "/tmp/encfs-pass-XXXXXX.sh");
-    int fd = mkstemp(tmpl);
-    std::string filepath(tmpl);
-    std::string escaped;
-    for (char c : password) {
-        if (c == '\'') escaped += "'\\''";
-        else escaped += c;
-    }
-    std::ostringstream os;
-    os << "#!/bin/sh\n";
-    for (int i = 0; i < lines; i++) os << "echo '" << escaped << "'\n";
-    std::string content = os.str();
-    write(fd, content.c_str(), content.size());
-    close(fd);
-    chmod(filepath.c_str(), 0755);
-    return filepath;
-}
-
 // =================================================================
 // Common: set up encfs opts and open volume
 // =================================================================
@@ -86,8 +70,11 @@ struct VolState {
         std::shared_ptr<encfs::EncFS_Opts> opts(new encfs::EncFS_Opts());
         opts->rootDir = cipherDir;
         if (usePass) {
+            // In EncFSMP, passwordProgram is treated as the literal password,
+            // not as an external program. This is a key difference from the
+            // original encfs project
             opts->useStdin = false;
-            opts->passwordProgram = makePasswordScript(password, 1);
+            opts->passwordProgram = password;
         } else {
             opts->useStdin = true;
         }
@@ -106,7 +93,7 @@ struct VolState {
         opts->rootDir = cipherDir;
         if (usePass) {
             opts->useStdin = false;
-            opts->passwordProgram = makePasswordScript(password, 2);
+            opts->passwordProgram = password;
         } else {
             opts->useStdin = true;
         }
@@ -137,8 +124,7 @@ static void showUsage(const char* prog) {
       "  get    <cipher-dir> <src> <dst> [-p pwd]  Extract file FROM volume\n\n"
       "Notes:\n"
       "  - All paths inside the encrypted volume are relative to the volume root\n"
-      "  - Use -p to provide a password; otherwise read from stdin\n"
-      "  - Password program writes password N times to stdout\n";
+      "  - Use -p to provide a password; otherwise read from stdin\n";
 }
 
 // ================================================================
@@ -180,30 +166,6 @@ static int cmdInfo(int argc, char** argv) {
     if (!vol.open(cipherDir, usePass, password)) return 1;
     std::cout << "EncFS MP Volume\n"
               << "  Directory: " << vol.cipherDir << "\n";
-    // Count files and dirs
-    size_t files = 0, dirs = 0;
-    uint64_t totalSize = 0;
-    try {
-        std::string base = vol.root->root->cipherPath("");
-        DIR* d = opendir(base.c_str());
-        if (d) {
-            struct dirent* e;
-            while ((e = readdir(d)) != NULL) {
-                std::string name(e->d_name);
-                if (name == "." || name == ".." || name.find(".encfs") == 0) continue;
-                struct stat st;
-                std::string full = base + "/" + name;
-                if (stat(full.c_str(), &st) == 0) {
-                    if (S_ISDIR(st.st_mode)) dirs++;
-                    else { files++; totalSize += (uint64_t)st.st_size; }
-                }
-            }
-            closedir(d);
-        }
-    } catch (...) {}
-    std::cout << "  Directories: " << dirs << "\n"
-              << "  Files:       " << files << "\n"
-              << "  Total size:  " << totalSize << " bytes\n";
     return 0;
 }
 
@@ -227,26 +189,17 @@ static int cmdList(int argc, char** argv) {
         std::string base = vol.root->root->cipherPath(path.c_str());
         DIR* d = opendir(base.c_str());
         if (!d) { std::cerr << "Cannot list: " << (path.empty() ? "/" : path) << "\n"; return 1; }
-        std::cout << "[" << (path.empty() ? std::string("/") : "/" + path) << "]\n"
-                  << std::left << std::setw(45) << "Name"
-                  << std::right << std::setw(15) << "Size"
-                  << std::setw(10) << "Type\n"
-                  << std::string(70, '-') << "\n";
-        // Get the ciphertext-encoded relative path (without rootDir)
+        std::cout << "[" << (path.empty() ? std::string("/") : "/" + path) << "]\n";
         std::string encRel = path.empty() ? "" : vol.root->root->cipherPathWithoutRoot(path.c_str());
         struct dirent* e;
         while ((e = readdir(d)) != NULL) {
             std::string encName(e->d_name);
             if (encName == "." || encName == ".." || encName.find(".encfs") == 0) continue;
             std::string fullEncPath = base + "/" + encName;
-            // Decode filename using IV chain: build full relative cipher path
             std::string plainName;
             try {
-                // Build the full encrypted relative path: "encDir/encFile"
                 std::string fullCipherRel = encRel.empty() ? encName : (encRel + "/" + encName);
-                // Decode to plaintext full path
                 std::string decoded = vol.root->root->plainPath(fullCipherRel.c_str());
-                // Extract just the filename (last component)
                 size_t lastSlash = decoded.rfind('/');
                 plainName = (lastSlash == std::string::npos) ? decoded : decoded.substr(lastSlash + 1);
             } catch (...) {
@@ -273,7 +226,7 @@ static int cmdList(int argc, char** argv) {
 }
 
 // ================================================================
-// CAT - read and decrypt file to stdout
+// CAT
 // ================================================================
 static int cmdCat(int argc, char** argv) {
     if (argc < 3) { std::cerr << "Need: cat <cipher-dir> <path>\n"; return 1; }
@@ -307,7 +260,7 @@ static int cmdCat(int argc, char** argv) {
 }
 
 // ================================================================
-// PUT - copy a local file into the encrypted volume
+// PUT
 // ================================================================
 static int cmdPut(int argc, char** argv) {
     if (argc < 4) { std::cerr << "Need: put <cipher-dir> <local-src> <plain-dst-path>\n"; return 1; }
@@ -329,31 +282,24 @@ static int cmdPut(int argc, char** argv) {
     VolState vol;
     if (!vol.open(cipherDir, usePass, password)) return 1;
     try {
-        // 0. Create parent directories if needed
         size_t slashPos = dstPath.rfind('/');
         if (slashPos != std::string::npos && slashPos > 0) {
             std::string parentPath = dstPath.substr(0, slashPos);
-            // Create recursively
             std::string current = "";
             std::istringstream iss(parentPath);
             std::string part;
             while (std::getline(iss, part, '/')) {
                 if (part.empty()) continue;
                 current = current.empty() ? part : current + "/" + part;
-                int mkres = vol.root->root->mkdir(current.c_str(), 0755, 0, 0);
-                // Don't fail on EEXIST (negative error code indicating existing)
+                vol.root->root->mkdir(current.c_str(), 0755, 0, 0);
             }
         }
-        // 1. Create FileNode (in-memory)
         auto node = vol.root->root->lookupNode(dstPath.c_str(), "put");
         if (!node) { std::cerr << "Cannot create FileNode for: " << dstPath << "\n"; return 1; }
-        // 2. Actually create the cipher file on disk
         int mkres = node->mknod(S_IFREG | 0644, 0, 0, 0);
         if (mkres < 0) { std::cerr << "Cannot create encrypted file: " << dstPath << " (err " << mkres << ")\n"; return 1; }
-        // 3. Open for writing
         int openRes = node->open(O_RDWR);
         if (openRes < 0) { std::cerr << "Cannot open for writing: " << dstPath << "\n"; return 1; }
-        // 4. Read local file, write encrypted
         std::ifstream in(srcFile.c_str(), std::ios::binary);
         if (!in) { std::cerr << "Cannot open source file: " << srcFile << "\n"; return 1; }
         const size_t BUF = 32768;
@@ -377,7 +323,7 @@ static int cmdPut(int argc, char** argv) {
 }
 
 // ================================================================
-// GET - extract a file from encrypted volume to local disk
+// GET
 // ================================================================
 static int cmdGet(int argc, char** argv) {
     if (argc < 4) { std::cerr << "Need: get <cipher-dir> <plain-src-path> <local-dst>\n"; return 1; }
@@ -443,7 +389,7 @@ static int cmdMkdir(int argc, char** argv) {
 }
 
 // ================================================================
-// RM - delete file or directory
+// RM
 // ================================================================
 static int cmdRm(int argc, char** argv) {
     if (argc < 3) { std::cerr << "Need: rm <cipher-dir> <path>\n"; return 1; }

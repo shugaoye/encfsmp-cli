@@ -1,24 +1,30 @@
 #ifndef FS_LAYER_H
 #define FS_LAYER_H
 
+// config.h defines efs_stat and efs_off_t in a platform-independent way
 #include "config.h"
-#include <string>
 
-#include <sys/stat.h>
+#include <string>
 #include <sys/types.h>
-#include <sys/time.h>
+#include <sys/stat.h>
+#include <fcntl.h>
 #include <dirent.h>
+#include <unistd.h>
+#include <sys/time.h>
+#include <sys/statvfs.h>
+#include <utime.h>
+
 #include <boost/filesystem.hpp>
 
-// efs_stat already defined in config.h
+// efs_stat and efs_off_t are defined in config.h
 
 class fs_layer
 {
 public:
     struct timeval_fs
     {
-        long tv_sec;     // seconds
-        long tv_usec;    // microseconds
+        long tv_sec;
+        long tv_usec;
     };
 
     static int gettimeofday(struct fs_layer::timeval_fs *, void *);
@@ -27,9 +33,9 @@ public:
     static std::string readFileToString(const char *fn);
     static bool writeFileFromString(const char *fn, const std::string &str);
 
-    static int fstat(int fd, efs_stat *buf);
     static int fsync(int fd);
     static int fdatasync(int fd);
+    static int fstat(int fd, efs_stat *buf);
 
     static int64_t pread(int fd, void *buf, int64_t count, int64_t offset);
     static int64_t pwrite(int fd, const void *buf, int64_t count, int64_t offset);
@@ -55,14 +61,14 @@ public:
     static inline int lstat(const char *path, efs_stat *buffer) {
         return stat(path, buffer);
     }
-    static int chmod (const char*, int);
+    static int chmod(const char*, int);
 
-    // DIR handling - use global ::DIR
+    // Use POSIX DIR and dirent directly on all platforms (Linux, macOS, MSYS2/MinGW)
     typedef ::DIR DIR;
     typedef struct ::dirent fs_dirent;
     static DIR *opendir(const char *name);
-    static int closedir(DIR* dir);
-    static fs_dirent* readdir(DIR* dir);
+    static int closedir(DIR *dir);
+    static fs_dirent *readdir(DIR *dir);
 
     static std::string concat_path(const std::string &path1,
         const std::string &path2, bool genericPath = false);

@@ -12,134 +12,101 @@ permissions:
   actions: write
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        platform: [windows-latest]
-        arch: [x64]
-        config: [Release]
-        include:
-          - platform: windows-latest
-            runner: windows-2022
-            exe_ext: .exe
-            zip_ext: .zip
-
-    runs-on: ${{ matrix.runner }}
-
+  # ------------------------------------------------------------------
+  # Windows build (produces encfsmp_cli.exe for Windows 11)
+  # ------------------------------------------------------------------
+  build-windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 1
 
-      - name: Setup MSYS2
+      - name: Setup MSYS2 / MinGW64
         uses: msys2/setup-msys2@v2
         with:
           msystem: mingw64
           update: true
-          install: |
+          install: >-
             mingw-w64-x86_64-toolchain
             mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-make
             mingw-w64-x86_64-boost
             mingw-w64-x86_64-openssl
 
       - name: Configure CMake
-        shell: msys2 {0}
         run: |
-          mkdir -p build-windows
-          cd build-windows
+          mkdir -p build
+          cd build
           cmake .. \
             -G "MinGW Makefiles" \
             -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_C_COMPILER=x86_64-w64-mingw32-gcc \
-            -DCMAKE_CXX_COMPILER=x86_64-w64-mingw32-g++ \
-            -DCMAKE_RC_COMPILER=x86_64-w64-mingw32-windres \
-            -DCMAKE_INSTALL_PREFIX=./install \
-            -DBUILD_SHARED_LIBS=OFF
+            -DCMAKE_C_COMPILER=gcc \
+            -DCMAKE_CXX_COMPILER=g++
 
       - name: Build
-        shell: msys2 {0}
         run: |
-          cd build-windows
+          cd build
           mingw32-make -j$(nproc)
 
-      - name: Create package
-        shell: msys2 {0}
+      - name: Strip & package
         run: |
-          mkdir -p package/bin
-          mkdir -p package/share/doc/encfsmp-cli
-          
-          # Copy binary
-          cp build-windows/encfsmp_cli.exe package/bin/ 2>/dev/null || \
-          cp build-windows/cli/encfsmp_cli.exe package/bin/ 2>/dev/null || \
-          cp build-windows/encfsmp-cli*/encfsmp_cli.exe package/bin/ 2>/dev/null || \
-          find build-windows -name "encfsmp_cli.exe" -exec cp {} package/bin/ \; -quit
-          
-          # Copy README
-          cp encfsmp-cli/README.md package/ 2>/dev/null || \
-          cp README.md package/ 2>/dev/null || true
-          cp encfsmp-cli/README.md package/share/doc/encfsmp-cli/ 2>/dev/null || true
-          
-          # Strip debug info
-          x86_64-w64-mingw32-strip package/bin/encfsmp_cli.exe 2>/dev/null || true
-          
-          # Create ZIP
-          cd package
-          powershell -Command "Compress-Archive -Path bin,share,README.md -DestinationPath ../encfsmp-cli-win-x64.zip -Force"
-          
-          ls -la *.zip ../package/bin/*.exe 2>/dev/null || ls -la ../package/bin/ 2>/dev/null || echo "Binary check"
+          strip build/encfsmp_cli.exe
+          mkdir -p dist/bin
+          cp build/encfsmp_cli.exe dist/bin/
+          cp README.md dist/ 2>/dev/null || true
+          cd dist
+          powershell -Command "Compress-Archive -Path bin,README.md -DestinationPath ../encfsmp-cli-win-x64.zip -Force"
 
-      - name: Upload artifact
+      - name: Upload Windows artifact
         uses: actions/upload-artifact@v4
         with:
           name: encfsmp-cli-windows-x64
-          path: |
-            encfsmp-cli-win-x64.zip
-            package/bin/*.exe
-          retention-days: 30
+          path: encfsmp-cli-win-x64.zip
 
-      - name: Display build info
-        run: |
-          echo "Build completed!"
-          ls -la package/bin/*.exe 2>/dev/null || ls -la encfsmp-cli-win-x64.zip 2>/dev/null || echo "Checking build output..."
-
-  # Linux build (for reference)
+  # ------------------------------------------------------------------
+  # Linux build
+  # ------------------------------------------------------------------
   build-linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 1
 
       - name: Install dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y cmake g++ make libssl-dev libboost-all-dev
 
-      - name: Configure and build
+      - name: Configure & build
         run: |
           mkdir -p build
           cd build
           cmake .. -DCMAKE_BUILD_TYPE=Release
           make -j$(nproc)
 
+      - name: Quick smoke test
+        run: |
+          cd build
+          ./encfsmp_cli --help | head -5
+          cd /tmp
+          rm -rf smoke_test && mkdir smoke_test && cd smoke_test
+          echo "hello smoke test" > in.txt
+          $GITHUB_WORKSPACE/build/encfsmp_cli create vault -p "test123"
+          $GITHUB_WORKSPACE/build/encfsmp_cli put vault in.txt hello.txt -p "test123"
+          $GITHUB_WORKSPACE/build/encfsmp_cli get vault hello.txt out.txt -p "test123"
+          diff -q in.txt out.txt && echo "SMOKE TEST PASSED"
+
       - name: Package
         run: |
-          mkdir -p package/bin
-          cp build/encfsmp_cli package/bin/
-          x86_64-linux-gnu-strip package/bin/encfsmp_cli 2>/dev/null || true
-          tar czf encfsmp-cli-linux-x86_64.tar.gz -C package bin
-          cp README.md package/
-          tar czf encfsmp-cli-linux-x86_64-full.tar.gz -C package .
+          mkdir -p dist/bin
+          cp build/encfsmp_cli dist/bin/
+          strip dist/bin/encfsmp_cli
+          tar czf encfsmp-cli-linux-x86_64.tar.gz -C dist bin
 
-      - name: Upload artifact
+      - name: Upload Linux artifact
         uses: actions/upload-artifact@v4
         with:
           name: encfsmp-cli-linux-x64
-          path: |
-            encfsmp-cli-linux-x86_64.tar.gz
-            encfsmp-cli-linux-x86_64-full.tar.gz
-          retention-days: 30
+          path: encfsmp-cli-linux-x86_64.tar.gz
